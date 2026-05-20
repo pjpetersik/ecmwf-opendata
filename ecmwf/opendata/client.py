@@ -111,6 +111,7 @@ class Result:
             self.datetime = dates
         self.for_urls = for_urls
         self.for_index = for_index
+        self.size = None
 
 
 class Client:
@@ -127,6 +128,9 @@ class Client:
         use_sas_token=None,
         sas_known_key="ecmwf",
         sas_custom_url=None,
+        maximum_retries=500,
+        retry_after=200,
+
     ):
         self._url = None
         self.source = source
@@ -137,6 +141,8 @@ class Client:
         self.infer_stream_keyword = infer_stream_keyword
         self.session = requests.Session()
         self.verify = verify
+        self.maximum_retries = maximum_retries
+        self.retry_after = retry_after
 
         if source == "ecmwf":
             warning_once(
@@ -189,9 +195,10 @@ class Client:
 
         return self._url
 
-    def retrieve(self, request=None, target=None, **kwargs):
-        result = self._get_urls(request, target=target, use_index=True, **kwargs)
+    def _robust(self, call):
+        return robust(call, self.maximum_retries, self.retry_after)
 
+    def _download(self, result: Result) -> Result:
         if self.use_sas_token:
             result.urls = self._apply_sas_to_urls(result.urls)
         result.size = download(
@@ -199,23 +206,20 @@ class Client:
             target=result.target,
             verify=self.verify,
             session=self.session,
+            maximum_retries=self.maximum_retries,
+            retry_after=self.retry_after,
         )
         _show_attribution_message()
+        return result
+    
+    def retrieve(self, request=None, target=None, **kwargs):
+        result = self._get_urls(request, target=target, use_index=True, **kwargs)
+        result = self._download(result)
         return result
 
     def download(self, request=None, target=None, **kwargs):
         result = self._get_urls(request, target=target, use_index=False, **kwargs)
-
-        if self.use_sas_token:
-            result.urls = self._apply_sas_to_urls(result.urls)
-
-        result.size = download(
-            result.urls,
-            target=result.target,
-            verify=self.verify,
-            session=self.session,
-        )
-        _show_attribution_message()
+        result = self._download(result)
         return result
 
     def latest(self, request=None, **kwargs):
@@ -329,7 +333,7 @@ class Client:
         for url in data_urls:
             base, _ = os.path.splitext(url)
             index_url = f"{base}.index"
-            r = robust(self.session.get)(index_url, verify=self.verify)
+            r = self._robust(self.session.get)(index_url)
             r.raise_for_status()
 
             parts = []
